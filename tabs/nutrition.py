@@ -1,148 +1,202 @@
 import streamlit as st
 import pandas as pd
-import altair as alt
-from datetime import datetime
 import utils
+from datetime import datetime
 
 def show():
     st.header("🥗 Nutrition & Macros")
 
-    # 1. CHARGEMENT DES DONNÉES (Nouvelles colonnes ajoutées)
-    # DB: Ajout de 'Poids_Ref' (ex: pour 100g)
+    # --- CHARGEMENT ---
     df_food_db = utils.load_data(utils.FOOD_DB_FILE, ["Aliment", "Kcal", "Proteines", "Glucides", "Lipides", "Poids_Ref"])
-    # LOG: Ajout de 'Repas' et 'Poids_Conso'
     df_log = utils.load_data(utils.NUTRITION_LOG_FILE, ["Date", "Repas", "Aliment", "Poids_Conso", "Kcal_Total", "Prot_Total", "Glu_Total", "Lip_Total"])
+    
+    # Chargement des objectifs (si fichier vide, valeurs par défaut)
+    df_goals = utils.load_data(utils.GOALS_FILE, ["Kcal_Goal", "Prot_Goal", "Glu_Goal", "Lip_Goal"])
+    if df_goals.empty:
+        current_goals = {"Kcal": 2000, "Prot": 150, "Glu": 200, "Lip": 70}
+    else:
+        # On prend la dernière ligne configurée
+        last_g = df_goals.iloc[-1]
+        current_goals = {
+            "Kcal": last_g['Kcal_Goal'], "Prot": last_g['Prot_Goal'], 
+            "Glu": last_g['Glu_Goal'], "Lip": last_g['Lip_Goal']
+        }
 
-    # --- SECTION A: CRÉATION ALIMENT (EN GRAMMES) ---
-    with st.expander("➕ Ajouter un aliment à la base"):
-        st.caption("Entrez les valeurs nutritionnelles pour un poids de référence (généralement 100g).")
+    # ====================================================
+    # 1. CONFIGURATION DES OBJECTIFS (EXPANDER)
+    # ====================================================
+    with st.expander("🎯 Définir mes objectifs quotidiens"):
+        st.caption("Définissez vos cibles. Les barres de progression s'ajusteront automatiquement.")
+        
+        target_kcal = st.number_input("Objectif Calories (Kcal)", value=int(current_goals["Kcal"]), step=50)
+        
+        mode = st.radio("Mode de calcul des macros :", ["Grammes (Précis)", "Pourcentages (%)"], horizontal=True)
+        
+        c_p, c_g, c_l = st.columns(3)
+        
+        if mode == "Grammes (Précis)":
+            # Mode manuel simple
+            target_prot = c_p.number_input("Protéines (g)", value=float(current_goals["Prot"]), step=1.0)
+            target_glu = c_g.number_input("Glucides (g)", value=float(current_goals["Glu"]), step=1.0)
+            target_lip = c_l.number_input("Lipides (g)", value=float(current_goals["Lip"]), step=1.0)
+            
+            # Petit check de cohérence calorique pour info
+            cal_from_macros = (target_prot * 4) + (target_glu * 4) + (target_lip * 9)
+            diff = target_kcal - cal_from_macros
+            if abs(diff) > 50:
+                st.warning(f"Note : Vos macros totalisent {int(cal_from_macros)} kcal (Différence de {int(diff)} kcal avec l'objectif).")
+
+        else:
+            # Mode Pourcentage intelligent
+            pct_prot = c_p.number_input("% Protéines", value=30, min_value=0, max_value=100, step=5)
+            pct_glu = c_g.number_input("% Glucides", value=40, min_value=0, max_value=100, step=5)
+            pct_lip = c_l.number_input("% Lipides", value=30, min_value=0, max_value=100, step=5)
+            
+            total_pct = pct_prot + pct_glu + pct_lip
+            if total_pct > 100:
+                st.error(f"Total : {total_pct}% ! Le total ne doit pas dépasser 100%.")
+                st.stop()
+            elif total_pct < 100:
+                st.info(f"Total actuel : {total_pct}%. Il reste {100-total_pct}% à attribuer.")
+
+            # Calcul automatique des grammes
+            # Prot & Glu = 4 kcal/g, Lip = 9 kcal/g
+            target_prot = (target_kcal * (pct_prot/100)) / 4
+            target_glu = (target_kcal * (pct_glu/100)) / 4
+            target_lip = (target_kcal * (pct_lip/100)) / 9
+            
+            st.success(f"Calculé : Prot {int(target_prot)}g | Glu {int(target_glu)}g | Lip {int(target_lip)}g")
+
+        if st.button("Sauvegarder les objectifs"):
+            new_goals = pd.DataFrame({
+                "Kcal_Goal": [target_kcal], "Prot_Goal": [target_prot], 
+                "Glu_Goal": [target_glu], "Lip_Goal": [target_lip]
+            })
+            utils.save_data(new_goals, utils.GOALS_FILE)
+            st.success("Objectifs mis à jour !")
+            st.rerun()
+
+    st.markdown("---")
+
+    # ====================================================
+    # 2. SUIVI JOURNALIER (PROGRESS BAR)
+    # ====================================================
+    col_date, col_viz = st.columns([1, 2])
+    with col_date:
+        selected_date = st.date_input("Date", datetime.today(), key="n_date")
+        selected_ts = pd.to_datetime(selected_date)
+    
+    # Filtrage du jour
+    daily_log = df_log[df_log['Date'] == selected_ts]
+    
+    # Sommes du jour
+    consumed = {
+        "Kcal": daily_log['Kcal_Total'].sum(),
+        "Prot": daily_log['Prot_Total'].sum(),
+        "Glu": daily_log['Glu_Total'].sum(),
+        "Lip": daily_log['Lip_Total'].sum()
+    }
+    
+    # Fonction d'affichage de barre
+    def display_progress(label, value, goal, color_hex="#10B981"):
+        pct = min(value / goal, 1.0) if goal > 0 else 0
+        delta = goal - value
+        
+        # Texte dynamique
+        txt_val = f"{int(value)} / {int(goal)}"
+        if label != "Kcal": txt_val += "g"
+            
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.write(f"**{label}** : {txt_val}")
+            st.progress(pct)
+        with c2:
+            # Indicateur restant
+            if delta >= 0:
+                st.caption(f"Reste : {int(delta)}")
+            else:
+                st.markdown(f"<span style='color:red'>+{int(abs(delta))} !</span>", unsafe_allow_html=True)
+
+    with col_viz:
+        st.markdown("### Bilan Journalier")
+        display_progress("Kcal", consumed["Kcal"], current_goals["Kcal"])
+        
+        # Petit layout pour les macros en dessous
+        c_m1, c_m2, c_m3 = st.columns(3)
+        c_m1.metric("Prot", f"{int(consumed['Prot'])}g", f"{int(consumed['Prot']-current_goals['Prot'])}g")
+        c_m2.metric("Glu", f"{int(consumed['Glu'])}g", f"{int(consumed['Glu']-current_goals['Glu'])}g")
+        c_m3.metric("Lip", f"{int(consumed['Lip'])}g", f"{int(consumed['Lip']-current_goals['Lip'])}g")
+
+    st.markdown("---")
+
+    # ====================================================
+    # 3. AJOUT REPAS & DB (Le reste inchangé mais réintégré)
+    # ====================================================
+    
+    # --- AJOUT ALIMENT DB ---
+    with st.expander("➕ Base de données Aliments"):
         c1, c2, c3 = st.columns([2, 1, 1])
-        new_name = c1.text_input("Nom de l'aliment")
-        ref_weight = c2.number_input("Poids de référence (g)", value=100, step=10)
+        new_name = c1.text_input("Nom aliment")
+        ref_weight = c2.number_input("Pour (g)", value=100, step=10)
         new_kcal = c3.number_input("Kcal", step=1)
-        
         c4, c5, c6 = st.columns(3)
-        new_prot = c4.number_input("Protéines (g)", step=0.1)
-        new_carb = c5.number_input("Glucides (g)", step=0.1)
-        new_fat = c6.number_input("Lipides (g)", step=0.1)
+        new_prot = c4.number_input("Prot (g)", step=0.1)
+        new_carb = c5.number_input("Glu (g)", step=0.1)
+        new_fat = c6.number_input("Lip (g)", step=0.1)
         
-        if st.button("Sauvegarder dans la base"):
+        if st.button("Ajouter à la base"):
             if new_name and new_name not in df_food_db['Aliment'].values:
                 new_row = pd.DataFrame({
-                    "Aliment": [new_name],
-                    "Kcal": [new_kcal], 
-                    "Proteines": [new_prot], 
-                    "Glucides": [new_carb], 
-                    "Lipides": [new_fat],
-                    "Poids_Ref": [ref_weight]
+                    "Aliment": [new_name], "Kcal": [new_kcal], "Proteines": [new_prot], 
+                    "Glucides": [new_carb], "Lipides": [new_fat], "Poids_Ref": [ref_weight]
                 })
                 df_food_db = pd.concat([df_food_db, new_row], ignore_index=True)
                 utils.save_data(df_food_db, utils.FOOD_DB_FILE)
                 st.success(f"{new_name} ajouté !")
                 st.rerun()
-            elif new_name in df_food_db['Aliment'].values:
-                st.error("Cet aliment existe déjà.")
 
-    st.markdown("---")
-
-    # --- SECTION B: BILAN JOURNALIER ---
-    col_date, col_summary = st.columns([1, 2])
-    with col_date:
-        selected_date = st.date_input("Date", datetime.today(), key="n_date")
-        selected_ts = pd.to_datetime(selected_date)
-    
-    # Filtrer le journal pour la date sélectionnée
-    daily_log = df_log[df_log['Date'] == selected_ts]
-
-    # Totaux
-    total_kcal = daily_log['Kcal_Total'].sum()
-    total_prot = daily_log['Prot_Total'].sum()
-    total_carb = daily_log['Glu_Total'].sum()
-    total_fat = daily_log['Lip_Total'].sum()
-
-    with col_summary:
-        st.markdown("### Total Journée")
-        c_k, c_p, c_g, c_l = st.columns(4)
-        c_k.metric("Kcal", int(total_kcal))
-        c_p.metric("Prot", f"{total_prot:.1f}g")
-        c_g.metric("Glu", f"{total_carb:.1f}g")
-        c_l.metric("Lip", f"{total_fat:.1f}g")
-
-    st.markdown("---")
-
-    # --- SECTION C: AJOUTER UN REPAS ---
-    st.subheader("🍽️ Enregistrer un repas")
-    
+    # --- ENREGISTRER REPAS ---
+    st.subheader("🍽️ Manger")
     if df_food_db.empty:
-        st.warning("La base d'aliments est vide.")
+        st.warning("Base vide.")
     else:
-        # Ligne 1 : Quoi et Quand ?
-        col_meal, col_food = st.columns([1, 2])
-        with col_meal:
-            meal_type = st.selectbox("Moment", ["Petit-déjeuner", "Déjeuner", "Dîner", "Snack"])
-        with col_food:
-            food_choice = st.selectbox("Aliment", df_food_db['Aliment'].unique())
-
-        # Ligne 2 : Combien ?
-        col_qty, col_btn = st.columns([2, 1])
-        with col_qty:
-            # Récupérer l'info pour afficher le poids de ref par défaut
-            food_ref_info = df_food_db[df_food_db['Aliment'] == food_choice].iloc[0]
-            ref_w = food_ref_info.get('Poids_Ref', 100) # Sécurité si ancienne db
-            
-            consumed_weight = st.number_input(f"Poids consommé (g)", value=float(ref_w), step=10.0)
-            
-        with col_btn:
-            st.write("") # Espace pour aligner le bouton verticalement
+        c_when, c_what = st.columns([1, 2])
+        meal_type = c_when.selectbox("Repas", ["Petit-déjeuner", "Déjeuner", "Dîner", "Snack"])
+        food_choice = c_what.selectbox("Aliment", df_food_db['Aliment'].unique())
+        
+        c_how_much, c_btn = st.columns([2, 1])
+        ref_info = df_food_db[df_food_db['Aliment'] == food_choice].iloc[0]
+        ref_w = ref_info.get('Poids_Ref', 100)
+        
+        qty_g = c_how_much.number_input(f"Poids (g)", value=float(ref_w), step=10.0)
+        
+        with c_btn:
             st.write("")
-            if st.button("Manger", use_container_width=True):
-                # CALCULS PROPORTIONNELS
-                ratio = consumed_weight / ref_w
-                
-                new_log_entry = pd.DataFrame({
-                    "Date": [selected_ts],
-                    "Repas": [meal_type],
-                    "Aliment": [food_choice],
-                    "Poids_Conso": [consumed_weight],
-                    "Kcal_Total": [food_ref_info['Kcal'] * ratio],
-                    "Prot_Total": [food_ref_info['Proteines'] * ratio],
-                    "Glu_Total": [food_ref_info['Glucides'] * ratio],
-                    "Lip_Total": [food_ref_info['Lipides'] * ratio]
+            st.write("")
+            if st.button("Ajouter", use_container_width=True):
+                ratio = qty_g / ref_w
+                new_entry = pd.DataFrame({
+                    "Date": [selected_ts], "Repas": [meal_type], "Aliment": [food_choice],
+                    "Poids_Conso": [qty_g],
+                    "Kcal_Total": [ref_info['Kcal'] * ratio],
+                    "Prot_Total": [ref_info['Proteines'] * ratio],
+                    "Glu_Total": [ref_info['Glucides'] * ratio],
+                    "Lip_Total": [ref_info['Lipides'] * ratio]
                 })
-                df_log = pd.concat([df_log, new_log_entry], ignore_index=True)
+                df_log = pd.concat([df_log, new_entry], ignore_index=True)
                 utils.save_data(df_log, utils.NUTRITION_LOG_FILE)
-                st.success(f"Ajouté au {meal_type} !")
+                st.success("Ajouté !")
                 st.rerun()
 
-    st.markdown("---")
-
-    # --- SECTION D: DÉTAIL PAR REPAS (4 BLOCS) ---
-    st.markdown("### Détails du menu")
-
-    meal_order = ["Petit-déjeuner", "Déjeuner", "Dîner", "Snack"]
-    
-    for meal in meal_order:
-        # Filtrer pour ce repas spécifique
-        meal_data = daily_log[daily_log['Repas'] == meal]
-        
-        with st.expander(f"{meal} ({int(meal_data['Kcal_Total'].sum())} Kcal)", expanded=True):
-            if not meal_data.empty:
-                # Affichage propre
-                display_df = meal_data[["Aliment", "Poids_Conso", "Kcal_Total", "Prot_Total", "Glu_Total", "Lip_Total"]].copy()
-                
-                # Renommer pour l'affichage
-                display_df.columns = ["Aliment", "Poids (g)", "Kcal", "Prot", "Glu", "Lip"]
-                
-                # Formatage des nombres pour faire joli
-                st.dataframe(display_df, use_container_width=True)
-                
-                # Bouton de suppression pour ce repas spécifique
-                # On utilise une clé unique basée sur le repas pour le bouton
-                if st.button(f"Supprimer dernier ajout ({meal})", key=f"del_{meal}"):
-                    # Trouver le dernier index de ce repas
-                    last_idx = meal_data.index[-1]
-                    df_log = df_log.drop(last_idx)
+    # --- DETAILS PAR REPAS ---
+    for meal in ["Petit-déjeuner", "Déjeuner", "Dîner", "Snack"]:
+        m_data = daily_log[daily_log['Repas'] == meal]
+        with st.expander(f"{meal} ({int(m_data['Kcal_Total'].sum())} Kcal)", expanded=(not m_data.empty)):
+            if not m_data.empty:
+                disp = m_data[["Aliment", "Poids_Conso", "Kcal_Total", "Prot_Total", "Glu_Total", "Lip_Total"]].copy()
+                disp.columns = ["Aliment", "g", "Kcal", "P", "G", "L"]
+                st.dataframe(disp, use_container_width=True)
+                if st.button(f"Effacer dernier ({meal})", key=f"del_{meal}"):
+                    df_log = df_log.drop(m_data.index[-1])
                     utils.save_data(df_log, utils.NUTRITION_LOG_FILE)
                     st.rerun()
-            else:
-                st.caption("Aucun aliment enregistré.")
