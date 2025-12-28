@@ -1,0 +1,12 @@
+services:
+  weight-app:
+    image: python:3.9-slim
+    container_name: my-weight-tracker
+    working_dir: /app
+    volumes:
+      - .:/app  # On lie le dossier actuel au conteneur (pour garder le CSV !)
+    ports:
+      - "8501:8501" # Le port standard de Streamlit
+    command: >
+      bash -c "pip install streamlit pandas && streamlit run app.py"
+    restart: always

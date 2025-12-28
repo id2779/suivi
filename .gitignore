@@ -1,0 +1,9 @@
+# Fichiers de données (on ne veut pas les partager sur GitHub)
+data.csv
+habits.csv
+
+# Fichiers système et python
+__pycache__/
+*.pyc
+.DS_Store
+.env
